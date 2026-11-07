@@ -69,7 +69,7 @@
 <body>
 <div class="wrap">
   <h1>Balança Lartec</h1>
-  <div class="sub">Leitura direta por Bluetooth, sem o app OKOK</div>
+  <div class="sub">Leitura direta por Bluetooth, sem o app OKOK · <b id="ver" style="color:var(--accent)">versão 3</b> (07/11 19:15)</div>
 
   <div class="card">
     <div id="noBt" class="warn" style="display:none">
@@ -117,7 +117,7 @@
   </div>
 
   <div class="card">
-    <details id="diag">
+    <details id="diag" open>
       <summary>Diagnóstico Bluetooth</summary>
       <div class="msg">Se o peso não aparecer, suba na balança com esta seção aberta e mande um print dela.</div>
       <div class="row" style="margin:8px 0">
@@ -215,13 +215,13 @@
     ev.manufacturerData && ev.manufacturerData.forEach((dv,id)=>parts.push(`mf 0x${id.toString(16).padStart(4,'0')}: ${hex(dv)}`));
     ev.serviceData && ev.serviceData.forEach((dv,uuid)=>parts.push(`sv ${uuid}: ${hex(dv)}`));
     const line = `${new Date().toLocaleTimeString('pt-BR')} [${(ev.device&&ev.device.name)||'sem nome'}] rssi ${ev.rssi??'?'}\n  ${parts.join('\n  ')||'(sem dados de fabricante)'}`;
-    rawLines.unshift(line); rawLines = rawLines.slice(0,25);
-    if($('diag').open) $('raw').textContent = rawLines.join('\n');
+    rawLines.unshift(line); rawLines = rawLines.slice(0,60);
+    $('raw').textContent = rawLines.join('\n');
   }
 
   function dlog(t){
     rawLines.unshift(`${new Date().toLocaleTimeString('pt-BR')} ${t}`); rawLines = rawLines.slice(0,60);
-    if($('diag').open) $('raw').textContent = rawLines.join('\n');
+    $('raw').textContent = rawLines.join('\n');
   }
   let lastAdKey = '', lastAdT = 0;
   function onAd(ev){
@@ -317,7 +317,19 @@
   $('btnConn').onclick = async ()=>{
     $('msgBt').textContent = '';
     try{
-      device = await bt.requestDevice({acceptAllDevices: true, optionalServices: OPT_SERVICES});
+      device = null;
+      const tries = [OPT_SERVICES, [0xfff0,0xffb0,0xffe0,0x181d,0x181b], null];
+      for(const opt of tries){
+        try{
+          device = await bt.requestDevice(opt ? {acceptAllDevices:true, optionalServices:opt} : {acceptAllDevices:true});
+          dlog('requestDevice ok ' + (opt ? `(com ${opt.length} serviços)` : '(sem serviços)'));
+          break;
+        }catch(e){
+          dlog(`requestDevice falhou ${opt ? '(com '+opt.length+' serviços)' : '(sem serviços)'}: name=${e&&e.name} code=${e&&e.code} msg=${e&&e.message||e}`);
+          if(e && e.name === 'NotFoundError') throw e;   // usuário cancelou: não insistir
+        }
+      }
+      if(!device) throw new Error('não foi possível abrir a lista de aparelhos (veja o Diagnóstico)');
       setStatus(`Ouvindo “${device.name||'balança'}” — suba na balança`, 'on');
       $('btnConn').textContent = 'Trocar de aparelho';
       $('btnStop').style.display = '';
@@ -326,6 +338,7 @@
     }catch(e){
       if(e && e.name === 'NotFoundError') $('msgBt').textContent = 'Nenhum aparelho escolhido. Na lista, procure nomes como Chipsea-BLE, ADV ou Yoda (pise na balança para ela ligar).';
       else $('msgBt').textContent = 'Erro: ' + (e && e.message || e);
+      dlog(`Erro ao conectar: name=${e&&e.name} code=${e&&e.code} msg=${e&&e.message||e}`);
       if(!device) setStatus('Desconectado', '');
     }
   };
@@ -363,7 +376,8 @@
   $('btnGatt').onclick = exploreGatt;
   $('btnClrLog').onclick = ()=>{ rawLines = []; $('raw').textContent = '(sem dados)'; };
   if(!bt){ $('noBt').style.display = ''; $('btnConn').disabled = true; $('btnScanAll').disabled = true; }
-  else dlog('Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
+  else { if(!bt.requestLEScan && !bt.watchAdvertisements) $('btnScanAll').style.display = 'none'; }
+  if(bt) dlog('Versão 3 · Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
             ', bluetooth.watchAdvertisements=' + (typeof bt.watchAdvertisements) + '\n' + navigator.userAgent.slice(0,90));
 
   // ======================= CSV / formatação =======================
