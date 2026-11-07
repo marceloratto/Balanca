@@ -69,7 +69,7 @@
 <body>
 <div class="wrap">
   <h1>Balança Lartec</h1>
-  <div class="sub">Leitura direta por Bluetooth, sem o app OKOK · <b id="ver" style="color:var(--accent)">versão 4</b> (07/11 19:25)</div>
+  <div class="sub">Leitura direta por Bluetooth, sem o app OKOK · <b id="ver" style="color:var(--accent)">versão 6</b> (07/11 19:50)</div>
 
   <div class="card">
     <div id="noBt" class="warn" style="display:none">
@@ -323,15 +323,21 @@
     $('msgBt').textContent = '';
     try{
       device = null;
-      const tries = [OPT_SERVICES, [0xfff0,0xffb0,0xffe0,0x181d,0x181b].map(full), ['0000fff0-0000-1000-8000-00805f9b34fb'], null];
-      for(const opt of tries){
+      // 1º: lista filtrada só pela balança (fabricante 0x01C0, formato OKOK C0); 2º: lista completa
+      const tries = [
+        ['filtro OKOK xxC0', {filters: Array.from({length:256}, (_,h)=>({manufacturerData:[{companyIdentifier:(h<<8)|0xC0}]})), optionalServices:OPT_SERVICES}],
+        ['filtro OKOK 01C0/FFC0', {filters:[{manufacturerData:[{companyIdentifier:0x01C0}]},{manufacturerData:[{companyIdentifier:0xFFC0}]}], optionalServices:OPT_SERVICES}],
+        ['lista completa',   {acceptAllDevices:true, optionalServices:OPT_SERVICES}],
+        ['lista simples',    {acceptAllDevices:true}]
+      ];
+      for(const [label, opts] of tries){
         try{
-          device = await bt.requestDevice(opt ? {acceptAllDevices:true, optionalServices:opt} : {acceptAllDevices:true});
-          dlog('requestDevice ok ' + (opt ? `(com ${opt.length} serviços)` : '(sem serviços)'));
+          device = await bt.requestDevice(opts);
+          dlog('requestDevice ok (' + label + ')');
           break;
         }catch(e){
-          dlog(`requestDevice falhou ${opt ? '(com '+opt.length+' serviços)' : '(sem serviços)'}: name=${e&&e.name} code=${e&&e.code} msg=${errStr(e)}`);
-          if(e && e.name === 'NotFoundError') throw e;   // usuário cancelou: não insistir
+          dlog(`requestDevice falhou (${label}): name=${e&&e.name} msg=${errStr(e)}`);
+          if(e && e.name === 'NotFoundError' && !label.startsWith('filtro')) throw e;
         }
       }
       if(!device) throw new Error('não foi possível abrir a lista de aparelhos (veja o Diagnóstico)');
@@ -383,7 +389,7 @@
   $('btnClrLog').onclick = ()=>{ rawLines = []; $('raw').textContent = '(sem dados)'; };
   if(!bt){ $('noBt').style.display = ''; $('btnConn').disabled = true; $('btnScanAll').disabled = true; }
   else { if(!bt.requestLEScan && !bt.watchAdvertisements) $('btnScanAll').style.display = 'none'; }
-  if(bt) dlog('Versão 4 · Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
+  if(bt) dlog('Versão 6 · Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
             ', bluetooth.watchAdvertisements=' + (typeof bt.watchAdvertisements) + '\n' + navigator.userAgent.slice(0,90));
 
   // ======================= CSV / formatação =======================
