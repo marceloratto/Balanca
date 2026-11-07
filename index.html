@@ -69,7 +69,7 @@
 <body>
 <div class="wrap">
   <h1>Balança Lartec</h1>
-  <div class="sub">Leitura direta por Bluetooth, sem o app OKOK · <b id="ver" style="color:var(--accent)">versão 3</b> (07/11 19:15)</div>
+  <div class="sub">Leitura direta por Bluetooth, sem o app OKOK · <b id="ver" style="color:var(--accent)">versão 4</b> (07/11 19:25)</div>
 
   <div class="card">
     <div id="noBt" class="warn" style="display:none">
@@ -219,6 +219,7 @@
     $('raw').textContent = rawLines.join('\n');
   }
 
+  const errStr = e => (e && (e.name||e.message)) ? `${e.name||''} ${e.message||''}`.trim() : String(e);
   function dlog(t){
     rawLines.unshift(`${new Date().toLocaleTimeString('pt-BR')} ${t}`); rawLines = rawLines.slice(0,60);
     $('raw').textContent = rawLines.join('\n');
@@ -263,7 +264,10 @@
   async function startWatch(dev){
     const ok = [];
     dev.addEventListener('advertisementreceived', onAd);
+    try{ dev.onadvertisementreceived = onAd; }catch(e){}
     bt.addEventListener('advertisementreceived', onAdFiltered);
+    clearInterval(window.__hb); const t0 = Date.now();
+    window.__hb = setInterval(()=>{ if(device) dlog(`… ${Math.round((Date.now()-t0)/1000)} s ouvindo, ${adCount} anúncios recebidos`); }, 10000);
     if(typeof dev.watchAdvertisements === 'function'){
       try{ await dev.watchAdvertisements(); ok.push('device.watchAdvertisements'); }catch(e){ dlog('device.watchAdvertisements falhou: '+e.message); } }
     if(typeof bt.watchAdvertisements === 'function'){
@@ -276,8 +280,9 @@
   }
 
   // ---------- exploração GATT (balanças que exigem conexão) ----------
-  const OPT_SERVICES = [0x1800,0x1801,0x180a,0x180f,0x181b,0x181d,0xfee7,0xffb0,0xffe0,0xfff0,0xffa0,0xffc0,0xffd0,0xff00,0xffe5,0xfff5,
-    '0000fff0-0000-1000-8000-00805f9b34fb','6e400001-b5a3-f393-e0a9-e50e24dcca9e','0000ffb0-0000-1000-8000-00805f9b34fb'];
+  const full = n => '0000' + n.toString(16).padStart(4,'0') + '-0000-1000-8000-00805f9b34fb';
+  const OPT_SERVICES = [0x180a,0x180f,0x181b,0x181d,0xfee7,0xffb0,0xffe0,0xfff0,0xffa0,0xffc0,0xffd0,0xff00,0xffe5,0xfff5].map(full)
+    .concat(['6e400001-b5a3-f393-e0a9-e50e24dcca9e']);
   async function exploreGatt(){
     if(!device){ dlog('Escolha um aparelho primeiro (Conectar balança).'); return; }
     $('diag').open = true;
@@ -304,7 +309,7 @@
         }
       }
       setStatus('Conectado (GATT) — suba na balança', 'on');
-    }catch(e){ dlog('GATT erro: '+e.message); }
+    }catch(e){ dlog('GATT erro: '+errStr(e)); }
   }
   function tryGattWeight(dv){
     // Weight Scale padrão (0x2A9D): flags + peso uint16 LE * 0.005 kg
@@ -318,14 +323,14 @@
     $('msgBt').textContent = '';
     try{
       device = null;
-      const tries = [OPT_SERVICES, [0xfff0,0xffb0,0xffe0,0x181d,0x181b], null];
+      const tries = [OPT_SERVICES, [0xfff0,0xffb0,0xffe0,0x181d,0x181b].map(full), ['0000fff0-0000-1000-8000-00805f9b34fb'], null];
       for(const opt of tries){
         try{
           device = await bt.requestDevice(opt ? {acceptAllDevices:true, optionalServices:opt} : {acceptAllDevices:true});
           dlog('requestDevice ok ' + (opt ? `(com ${opt.length} serviços)` : '(sem serviços)'));
           break;
         }catch(e){
-          dlog(`requestDevice falhou ${opt ? '(com '+opt.length+' serviços)' : '(sem serviços)'}: name=${e&&e.name} code=${e&&e.code} msg=${e&&e.message||e}`);
+          dlog(`requestDevice falhou ${opt ? '(com '+opt.length+' serviços)' : '(sem serviços)'}: name=${e&&e.name} code=${e&&e.code} msg=${errStr(e)}`);
           if(e && e.name === 'NotFoundError') throw e;   // usuário cancelou: não insistir
         }
       }
@@ -338,7 +343,7 @@
     }catch(e){
       if(e && e.name === 'NotFoundError') $('msgBt').textContent = 'Nenhum aparelho escolhido. Na lista, procure nomes como Chipsea-BLE, ADV ou Yoda (pise na balança para ela ligar).';
       else $('msgBt').textContent = 'Erro: ' + (e && e.message || e);
-      dlog(`Erro ao conectar: name=${e&&e.name} code=${e&&e.code} msg=${e&&e.message||e}`);
+      dlog(`Erro ao conectar: name=${e&&e.name} code=${e&&e.code} msg=${errStr(e)}`);
       if(!device) setStatus('Desconectado', '');
     }
   };
@@ -365,6 +370,7 @@
     try{ if(scan && scan.stop) scan.stop(); }catch(e){}
     try{ bt.removeEventListener('advertisementreceived', onAd); bt.removeEventListener('advertisementreceived', onAdFiltered); }catch(e){}
     try{ if(device && device.gatt && device.gatt.connected) device.gatt.disconnect(); }catch(e){}
+    clearInterval(window.__hb);
     $('btnGatt').style.display = 'none';
     device = null; scan = null; adCount = 0;
     setStatus('Desconectado',''); setLive(null);
@@ -377,7 +383,7 @@
   $('btnClrLog').onclick = ()=>{ rawLines = []; $('raw').textContent = '(sem dados)'; };
   if(!bt){ $('noBt').style.display = ''; $('btnConn').disabled = true; $('btnScanAll').disabled = true; }
   else { if(!bt.requestLEScan && !bt.watchAdvertisements) $('btnScanAll').style.display = 'none'; }
-  if(bt) dlog('Versão 3 · Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
+  if(bt) dlog('Versão 4 · Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
             ', bluetooth.watchAdvertisements=' + (typeof bt.watchAdvertisements) + '\n' + navigator.userAgent.slice(0,90));
 
   // ======================= CSV / formatação =======================
