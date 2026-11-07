@@ -120,6 +120,10 @@
     <details id="diag">
       <summary>Diagnóstico Bluetooth</summary>
       <div class="msg">Se o peso não aparecer, suba na balança com esta seção aberta e mande um print dela.</div>
+      <div class="row" style="margin:8px 0">
+        <button id="btnGatt" style="display:none">Explorar conexão (GATT)</button>
+        <button id="btnClrLog" class="ghost">Limpar log</button>
+      </div>
       <div class="mono" id="raw">(sem dados)</div>
     </details>
   </div>
@@ -215,12 +219,21 @@
     if($('diag').open) $('raw').textContent = rawLines.join('\n');
   }
 
+  function dlog(t){
+    rawLines.unshift(`${new Date().toLocaleTimeString('pt-BR')} ${t}`); rawLines = rawLines.slice(0,60);
+    if($('diag').open) $('raw').textContent = rawLines.join('\n');
+  }
+  let lastAdKey = '', lastAdT = 0;
   function onAd(ev){
     const name = ev.device && ev.device.name;
     const mf = ev.manufacturerData || new Map();
-    if(scan && !device && !looksLikeOkok(name, mf)) return;  // modo "escanear tudo": ignora outros aparelhos
+    // evita processar o mesmo anúncio duas vezes (vários ouvintes ligados)
+    const key = (ev.device&&ev.device.id||'') + [...mf].map(([k,d])=>k+':'+hex(d)).join('|');
+    if(key === lastAdKey && Date.now() - lastAdT < 150) return;
+    lastAdKey = key; lastAdT = Date.now();
     adCount++;
-    logRaw(ev);
+    logRaw(ev);                                   // diagnóstico mostra TUDO
+    if(scan && !device && !looksLikeOkok(name, mf)){ setStatus(`Procurando… ${adCount} sinais recebidos`, 'on'); return; }
     const r = parseOkok(mf);
     if(!r){ setStatus(`Recebendo sinais (${adCount}), formato desconhecido — veja o Diagnóstico`, 'on'); return; }
     if(r.kg < 2){ setLive(null); setStatus('Balança pronta — suba nela', 'on'); return; }
@@ -245,18 +258,66 @@
     render();
   }
 
+  // liga TODOS os métodos de escuta disponíveis (cada navegador implementa um)
+  const onAdFiltered = e => { if(!device || !e.device || e.device.id === device.id) onAd(e); };
   async function startWatch(dev){
+    const ok = [];
     dev.addEventListener('advertisementreceived', onAd);
-    if(typeof dev.watchAdvertisements === 'function'){ await dev.watchAdvertisements(); return 'device'; }
-    if(bt.watchAdvertisements){ await bt.watchAdvertisements({acceptAllAdvertisements:true}); bt.addEventListener('advertisementreceived', e=>{ if(!e.device||e.device.id===dev.id) onAd(e); }); return 'global'; }
-    if(bt.requestLEScan){ scan = await bt.requestLEScan({acceptAllAdvertisements:true, keepRepeatedDevices:true}); bt.addEventListener('advertisementreceived', e=>{ if(!e.device||e.device.id===dev.id) onAd(e); }); return 'scan'; }
-    throw new Error('Este navegador não permite ouvir anúncios Bluetooth.');
+    bt.addEventListener('advertisementreceived', onAdFiltered);
+    if(typeof dev.watchAdvertisements === 'function'){
+      try{ await dev.watchAdvertisements(); ok.push('device.watchAdvertisements'); }catch(e){ dlog('device.watchAdvertisements falhou: '+e.message); } }
+    if(typeof bt.watchAdvertisements === 'function'){
+      try{ await bt.watchAdvertisements({acceptAllAdvertisements:true, keepRepeatedDevices:true}); ok.push('bluetooth.watchAdvertisements'); }catch(e){ dlog('bluetooth.watchAdvertisements falhou: '+e.message); } }
+    if(typeof bt.requestLEScan === 'function'){
+      try{ scan = await bt.requestLEScan({acceptAllAdvertisements:true, keepRepeatedDevices:true}); ok.push('requestLEScan'); }catch(e){ dlog('requestLEScan falhou: '+e.message); } }
+    dlog(`Aparelho: ${dev.name||'(sem nome)'} id=${dev.id}\nEscuta ativa: ${ok.join(', ')||'NENHUMA'}`);
+    $('btnGatt').style.display = '';
+    if(!ok.length) throw new Error('Este navegador não permite ouvir anúncios Bluetooth.');
+  }
+
+  // ---------- exploração GATT (balanças que exigem conexão) ----------
+  const OPT_SERVICES = [0x1800,0x1801,0x180a,0x180f,0x181b,0x181d,0xfee7,0xffb0,0xffe0,0xfff0,0xffa0,0xffc0,0xffd0,0xff00,0xffe5,0xfff5,
+    '0000fff0-0000-1000-8000-00805f9b34fb','6e400001-b5a3-f393-e0a9-e50e24dcca9e','0000ffb0-0000-1000-8000-00805f9b34fb'];
+  async function exploreGatt(){
+    if(!device){ dlog('Escolha um aparelho primeiro (Conectar balança).'); return; }
+    $('diag').open = true;
+    try{
+      dlog('Conectando GATT…');
+      const srv = await device.gatt.connect();
+      const services = await srv.getPrimaryServices();
+      dlog(`Conectado. ${services.length} serviços.`);
+      for(const s of services){
+        let chars = []; try{ chars = await s.getCharacteristics(); }catch(e){}
+        dlog(`Serviço ${s.uuid}\n  ` + (chars.map(c=>{ const p=c.properties||{};
+          return `${c.uuid} [${['read','write','writeWithoutResponse','notify','indicate'].filter(k=>p[k]).join(',')}]`; }).join('\n  ') || '(sem características)'));
+        for(const c of chars){
+          const p = c.properties || {};
+          if(p.notify || p.indicate){
+            try{
+              c.addEventListener('characteristicvaluechanged', ev=>{
+                const dv = ev.target.value; dlog(`notif ${c.uuid.slice(4,8)}: ${hex(dv)}`); tryGattWeight(dv);
+              });
+              await c.startNotifications(); dlog(`  ouvindo ${c.uuid.slice(4,8)}`);
+            }catch(e){ dlog(`  notify ${c.uuid.slice(4,8)} falhou: ${e.message}`); }
+          }
+          if(p.read){ try{ const v = await c.readValue(); dlog(`  leitura ${c.uuid.slice(4,8)}: ${hex(v)}`); }catch(e){} }
+        }
+      }
+      setStatus('Conectado (GATT) — suba na balança', 'on');
+    }catch(e){ dlog('GATT erro: '+e.message); }
+  }
+  function tryGattWeight(dv){
+    // Weight Scale padrão (0x2A9D): flags + peso uint16 LE * 0.005 kg
+    if(dv.byteLength >= 3 && dv.byteLength <= 13){
+      const flags = dv.getUint8(0);
+      if((flags & 1) === 0){ const kg = dv.getUint16(1, true) * 0.005; if(kg > 2 && kg < 300) setLive(kg); }
+    }
   }
 
   $('btnConn').onclick = async ()=>{
     $('msgBt').textContent = '';
     try{
-      device = await bt.requestDevice({acceptAllDevices: true});
+      device = await bt.requestDevice({acceptAllDevices: true, optionalServices: OPT_SERVICES});
       setStatus(`Ouvindo “${device.name||'balança'}” — suba na balança`, 'on');
       $('btnConn').textContent = 'Trocar de aparelho';
       $('btnStop').style.display = '';
@@ -275,8 +336,12 @@
       device = null;
       if(!bt.requestLEScan && !bt.watchAdvertisements) throw new Error('Escaneamento geral não suportado neste navegador.');
       bt.addEventListener('advertisementreceived', onAd);
-      if(bt.requestLEScan) scan = await bt.requestLEScan({acceptAllAdvertisements:true, keepRepeatedDevices:true});
-      else { await bt.watchAdvertisements({acceptAllAdvertisements:true}); scan = true; }
+      const ok = [];
+      if(bt.requestLEScan){ try{ scan = await bt.requestLEScan({acceptAllAdvertisements:true, keepRepeatedDevices:true}); ok.push('requestLEScan'); }catch(e){ dlog('requestLEScan falhou: '+e.message); } }
+      if(bt.watchAdvertisements){ try{ await bt.watchAdvertisements({acceptAllAdvertisements:true, keepRepeatedDevices:true}); ok.push('bluetooth.watchAdvertisements'); }catch(e){ dlog('bluetooth.watchAdvertisements falhou: '+e.message); } }
+      scan = scan || true;
+      dlog('Escanear tudo — escuta ativa: ' + (ok.join(', ')||'NENHUMA'));
+      $('diag').open = true;
       setStatus('Procurando a balança — suba nela', 'on');
       $('btnStop').style.display = '';
     }catch(e){ $('msgBt').textContent = 'Erro: ' + (e && e.message || e); }
@@ -285,7 +350,9 @@
   $('btnStop').onclick = ()=>{
     try{ if(device && device.unwatchAdvertisements) device.unwatchAdvertisements(); }catch(e){}
     try{ if(scan && scan.stop) scan.stop(); }catch(e){}
-    try{ bt.removeEventListener('advertisementreceived', onAd); }catch(e){}
+    try{ bt.removeEventListener('advertisementreceived', onAd); bt.removeEventListener('advertisementreceived', onAdFiltered); }catch(e){}
+    try{ if(device && device.gatt && device.gatt.connected) device.gatt.disconnect(); }catch(e){}
+    $('btnGatt').style.display = 'none';
     device = null; scan = null; adCount = 0;
     setStatus('Desconectado',''); setLive(null);
     $('btnStop').style.display = 'none'; $('btnConn').textContent = 'Conectar balança';
@@ -293,7 +360,11 @@
 
   $('diag').addEventListener('toggle', ()=>{ if($('diag').open) $('raw').textContent = rawLines.join('\n') || '(sem dados)'; });
 
+  $('btnGatt').onclick = exploreGatt;
+  $('btnClrLog').onclick = ()=>{ rawLines = []; $('raw').textContent = '(sem dados)'; };
   if(!bt){ $('noBt').style.display = ''; $('btnConn').disabled = true; $('btnScanAll').disabled = true; }
+  else dlog('Suporte: requestDevice=' + (typeof bt.requestDevice) + ', requestLEScan=' + (typeof bt.requestLEScan) +
+            ', bluetooth.watchAdvertisements=' + (typeof bt.watchAdvertisements) + '\n' + navigator.userAgent.slice(0,90));
 
   // ======================= CSV / formatação =======================
   const fmtKg  = v => v.toLocaleString('pt-BR',{minimumFractionDigits:1, maximumFractionDigits:2});
